@@ -25,6 +25,7 @@
 
 #include "ui_qMRMLSegmentEditorWidget.h"
 
+#include "vtkMRMLInteractionNode.h"
 #include "vtkMRMLSegmentationNode.h"
 #include "vtkMRMLSegmentationDisplayNode.h"
 #include "vtkMRMLSegmentEditorNode.h"
@@ -177,6 +178,9 @@ public:
   vtkSmartPointer<vtkSegmentationHistory> SegmentationHistory;
 
   vtkWeakPointer<vtkMRMLScalarVolumeNode> MasterVolumeNode;
+
+  // Observe InteractionNode to detect when mouse mode is changed
+  vtkWeakPointer<vtkMRMLInteractionNode> InteractionNode;
 
   /// Lock widget to make segmentation read-only.
   // In the future locked state may be read from the Segmentation node.
@@ -1225,7 +1229,7 @@ void qMRMLSegmentEditorWidget::updateWidgetFromSegmentationNode()
       if (selectionNode)
         {
         selectionNode->SetActiveLabelVolumeID(NULL);
-        qSlicerCoreApplication::application()->applicationLogic()->PropagateVolumeSelection();
+        qSlicerCoreApplication::application()->applicationLogic()->PropagateVolumeSelection(vtkMRMLApplicationLogic::LabelLayer, 0);
         }
       else
         {
@@ -1396,6 +1400,12 @@ void qMRMLSegmentEditorWidget::updateEffectsSectionFromMRML()
     // The captured events are propagated to the active effect if any.
     this->setupViewObservations();
 
+    // Deactivate markup/ruler/ROI placement
+    if (d->InteractionNode && d->InteractionNode->GetCurrentInteractionMode() != vtkMRMLInteractionNode::ViewTransform)
+      {
+      d->InteractionNode->SetCurrentInteractionMode(vtkMRMLInteractionNode::ViewTransform);
+      }
+
     // Activate newly selected effect
     activeEffect->activate();
     d->OptionsGroupBox->show();
@@ -1450,6 +1460,7 @@ void qMRMLSegmentEditorWidget::updateEffectsSectionFromMRML()
 //-----------------------------------------------------------------------------
 void qMRMLSegmentEditorWidget::setMRMLScene(vtkMRMLScene* newScene)
 {
+  Q_D(qMRMLSegmentEditorWidget);
   if (newScene == this->mrmlScene())
     {
     return;
@@ -1459,6 +1470,14 @@ void qMRMLSegmentEditorWidget::setMRMLScene(vtkMRMLScene* newScene)
 
   // Make connections that depend on the Slicer application
   QObject::connect( qSlicerApplication::application()->layoutManager(), SIGNAL(layoutChanged(int)), this, SLOT(onLayoutChanged(int)) );
+
+  vtkMRMLInteractionNode *interactionNode = NULL;
+  if (newScene)
+    {
+    interactionNode = vtkMRMLInteractionNode::SafeDownCast(newScene->GetNodeByID("vtkMRMLInteractionNodeSingleton"));
+    }
+  this->qvtkReconnect(d->InteractionNode, interactionNode, vtkCommand::ModifiedEvent, this, SLOT(onInteractionNodeModified()));
+  d->InteractionNode = interactionNode;
 
   // Update UI
   this->updateWidgetFromMRML();
@@ -1473,6 +1492,20 @@ void qMRMLSegmentEditorWidget::onMRMLSceneEndCloseEvent()
   this->initializeParameterSetNode();
   this->updateWidgetFromMRML();
 }
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidget::onInteractionNodeModified()
+{
+  Q_D(const qMRMLSegmentEditorWidget);
+  if (!d->InteractionNode || !d->ActiveEffect)
+    {
+    return;
+    }
+  // Only notify the active effect about interaction node changes
+  // (inactive effects should not interact with the user)
+  d->ActiveEffect->interactionNodeModified(d->InteractionNode);
+}
+
 //------------------------------------------------------------------------------
 vtkMRMLSegmentEditorNode* qMRMLSegmentEditorWidget::mrmlSegmentEditorNode()const
 {
@@ -1722,6 +1755,7 @@ void qMRMLSegmentEditorWidget::onMasterVolumeNodeChanged(vtkMRMLNode* node)
         }
       selectionNode->SetActiveVolumeID(volumeNode->GetID());
       selectionNode->SetSecondaryVolumeID(NULL); // Hide foreground volume
+      selectionNode->SetActiveLabelVolumeID(NULL); // Hide label volume
       qSlicerCoreApplication::application()->applicationLogic()->PropagateVolumeSelection();
       }
 

@@ -87,6 +87,8 @@ void qSlicerScalarVolumeDisplayWidgetPrivate::init()
   QObject::connect(this->ColorTableComboBox, SIGNAL(currentNodeChanged(vtkMRMLNode*)),
                    q, SLOT(setColorNode(vtkMRMLNode*)));
 
+  QObject::connect(this->LockWindowLevelButton, SIGNAL(clicked()),
+                   q, SLOT(onLockWindowLevelButtonClicked()));
   QObject::connect(this->CTBonePresetToolButton, SIGNAL(clicked()),
                    q, SLOT(onPresetButtonClicked()));
   QObject::connect(this->CTAirPresetToolButton, SIGNAL(clicked()),
@@ -184,13 +186,21 @@ void qSlicerScalarVolumeDisplayWidget::setMRMLVolumeNode(vtkMRMLScalarVolumeNode
   qvtkReconnect(oldVolumeDisplayNode, volumeNode ? volumeNode->GetDisplayNode() :0,
                 vtkCommand::ModifiedEvent,
                 this, SLOT(updateWidgetFromMRML()));
-  d->Histogram->setDataArray(volumeNode &&
-                             volumeNode->GetImageData() &&
-                             volumeNode->GetImageData()->GetPointData() ?
-                             volumeNode->GetImageData()->GetPointData()->GetScalars() :
-                             0);
-  d->Histogram->setNumberOfBins(1000);
-  d->Histogram->build();
+  vtkDataArray* voxelValues = NULL;
+  if (volumeNode && volumeNode->GetImageData() && volumeNode->GetImageData()->GetPointData())
+    {
+    voxelValues = volumeNode->GetImageData()->GetPointData()->GetScalars();
+    }
+  d->Histogram->setDataArray(voxelValues);
+  d->HistogramGroupBox->setVisible(voxelValues != NULL);
+  if (voxelValues)
+    {
+    // Calling build() with an empty volume causes heap corruption
+    // (reported by VS2013 in debug mode), therefore we only build
+    // the histogram if there are voxels (otherwise histogram is hidden).
+    d->Histogram->setNumberOfBins(1000);
+    d->Histogram->build();
+    }
   this->setEnabled(volumeNode != 0);
 
   this->updateWidgetFromMRML();
@@ -206,6 +216,26 @@ void qSlicerScalarVolumeDisplayWidget::updateWidgetFromMRML()
     {
     d->ColorTableComboBox->setCurrentNode(displayNode->GetColorNode());
     d->InterpolateCheckbox->setChecked(displayNode->GetInterpolate());
+    d->LockWindowLevelButton->setChecked(displayNode->GetInterpolate());
+    bool lockedWindowLevel = displayNode->GetWindowLevelLocked();
+    if (lockedWindowLevel)
+      {
+      d->LockWindowLevelButton->setIcon(QIcon(":Icons/Medium/SlicerLock.png"));
+      d->LockWindowLevelButton->setToolTip(QString("Click to enable modification of Window/Level values"));
+      }
+    else
+      {
+      d->LockWindowLevelButton->setIcon(QIcon(":Icons/Medium/SlicerUnlock.png"));
+      d->LockWindowLevelButton->setToolTip(QString("Click to prevent modification of Window/Level values"));
+      }
+    d->CTBonePresetToolButton->setEnabled(!lockedWindowLevel);
+    d->CTAirPresetToolButton->setEnabled(!lockedWindowLevel);
+    d->PETPresetToolButton->setEnabled(!lockedWindowLevel);
+    d->CTAbdomenPresetToolButton->setEnabled(!lockedWindowLevel);
+    d->CTBrainPresetToolButton->setEnabled(!lockedWindowLevel);
+    d->CTLungPresetToolButton->setEnabled(!lockedWindowLevel);
+    d->DTIPresetToolButton->setEnabled(!lockedWindowLevel);
+    d->MRMLWindowLevelWidget->setEnabled(!lockedWindowLevel);
     }
   if (this->isVisible())
     {
@@ -322,6 +352,19 @@ void qSlicerScalarVolumeDisplayWidget::setColorNode(vtkMRMLNode* colorNode)
     }
   Q_ASSERT(vtkMRMLColorNode::SafeDownCast(colorNode));
   displayNode->SetAndObserveColorNodeID(colorNode->GetID());
+}
+
+// --------------------------------------------------------------------------
+void qSlicerScalarVolumeDisplayWidget::onLockWindowLevelButtonClicked()
+{
+  vtkMRMLScalarVolumeDisplayNode* displayNode = this->volumeDisplayNode();
+  if (!displayNode)
+    {
+    return;
+    }
+  // toggle the lock
+  int locked = displayNode->GetWindowLevelLocked();
+  displayNode->SetWindowLevelLocked(!locked);
 }
 
 // --------------------------------------------------------------------------

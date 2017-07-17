@@ -1,5 +1,6 @@
+import numpy
 import os
-import vtk, qt, ctk, slicer
+import vtk, qt, ctk, slicer, vtkITK
 from DICOMLib import DICOMPlugin
 from DICOMLib import DICOMLoadable
 from DICOMLib import DICOMExportScalarVolume
@@ -37,6 +38,53 @@ class DICOMScalarVolumePluginClass(DICOMPlugin):
     self.tags['windowCenter'] = "0028,1050"
     self.tags['windowWidth'] = "0028,1051"
 
+  @staticmethod
+  def readerApproaches():
+    """Available reader implementations.  First entry is initial default.
+    Note: the settings file stores the index of the user's selected reader
+    approach, so if new approaches are added the should go at the
+    end of the list.
+    """
+    return ["GDCM with DCMTK fallback", "DCMTK", "GDCM", "Archetype"]
+
+  @staticmethod
+  def settingsPanelEntry(panel, parent):
+    """Create a settings panel entry for this plugin class.
+    It is added to the DICOM panel of the application settings
+    by the DICOM module.
+    """
+    formLayout = qt.QFormLayout(parent)
+    readersComboBox = qt.QComboBox()
+    for approach in DICOMScalarVolumePluginClass.readerApproaches():
+      readersComboBox.addItem(approach)
+
+    readersComboBox.toolTip = "Preferred back end.  Archetype was used by default in Slicer before June of 2017.  Change this setting if data that previously loaded stops working (and report an issue)."
+
+    formLayout.addRow("DICOM reader approach", readersComboBox)
+
+    panel.registerProperty(
+      "DICOM/ScalarVolume/ReaderApproach", readersComboBox,
+      "currentIndex", qt.SIGNAL("currentIndexChanged(int)"))
+
+  @staticmethod
+  def compareVolumeNodes(volumeNode1,volumeNode2):
+    """
+    Given two mrml volume nodes, return true of the numpy arrays have identical data
+    and other metadata matches.  Returns empty string on match, otherwise
+    a string with a list of differences separated by newlines.
+    """
+    volumesLogic = slicer.modules.volumes.logic()
+    comparison = ""
+    comparison += volumesLogic.CompareVolumeGeometry(volumeNode1, volumeNode2)
+    image1 = volumeNode1.GetImageData()
+    image2 = volumeNode2.GetImageData()
+    if image1.GetScalarType() != image2.GetScalarType():
+      comparison += "First volume is %s, but second is %s" % (image1.GetScalarTypeAsString(), image2.GetScalarTypeAsString())
+    array1 = slicer.util.array(volumeNode1.GetID())
+    array2 = slicer.util.array(volumeNode2.GetID())
+    if not numpy.all(array1 == array2):
+      comparison += "Pixel data mismatch\n"
+    return comparison
 
   def examineForImport(self,fileLists):
     """ Returns a sorted list of DICOMLoadable instances
@@ -88,9 +136,6 @@ class DICOMScalarVolumePluginClass(DICOMPlugin):
         "diffusionGradientOrientation",
         "imageOrientationPatient",
     ]
-
-    # it will be set to true if pixel data is found in any of the files
-    pixelDataAvailable = False
 
     #
     # first, look for subseries within this series
@@ -285,6 +330,17 @@ class DICOMScalarVolumePluginClass(DICOMPlugin):
   def dot(self, x, y):
     return x[0] * y[0] + x[1] * y[1] + x[2] * y[2]
 
+
+  #
+  # different ways to load a set of dicom files:
+  # - Logic: relies on the same loading mechanism used
+  #   by the File->Add Data dialog in the Slicer GUI.
+  #   This uses vtkITK under the hood with GDCM as
+  #   the default loader.
+  # - DCMTK: explicitly uses the DCMTKImageIO
+  # - GDCM: explicitly uses the GDCMImageIO
+  #
+
   def loadFilesWithArchetype(self,files,name):
     """Load files in the traditional Slicer manner
     using the volume logic helper class
@@ -297,11 +353,53 @@ class DICOMScalarVolumePluginClass(DICOMPlugin):
     volumesLogic = slicer.modules.volumes.logic()
     return(volumesLogic.AddArchetypeScalarVolume(files[0],name,0,fileList))
 
-  def load(self,loadable):
-    """Load the select as a scalar volume
+  def loadFilesWithSeriesReader(self,imageIOName,files,name):
+    """ Explicitly use the named imageIO to perform the loading
     """
-    volumeNode = self.loadFilesWithArchetype(loadable.files, loadable.name)
 
+    reader = vtkITK.vtkITKArchetypeImageSeriesScalarReader()
+    reader.SetArchetype(files[0]);
+    for f in files:
+      reader.AddFileName(slicer.util.toVTKString(f))
+    reader.SetSingleFile(0);
+    reader.SetOutputScalarTypeToNative()
+    reader.SetDesiredCoordinateOrientationToNative()
+    reader.SetUseNativeOriginOn()
+    if imageIOName == "GDCM":
+      reader.SetDICOMImageIOApproachToGDCM()
+    elif imageIOName == "DCMTK":
+      reader.SetDICOMImageIOApproachToDCMTK()
+    else:
+      raise Exception("Invalid imageIOName of %s" % imageIOName)
+    logging.info("Loading with imageIOName: %s" % imageIOName)
+    reader.Update()
+
+    slicer.modules.reader = reader
+    if reader.GetErrorCode() != vtk.vtkErrorCode.NoError:
+      errorStrings = (imageIOName, vtk.vtkErrorCode.GetStringFromErrorCode(reader.GetErrorCode()))
+      logging.error("Could not read scalar volume using %s approach.  Error is: %s" % errorStrings)
+      return
+
+
+    imageChangeInformation = vtk.vtkImageChangeInformation()
+    imageChangeInformation.SetInputConnection(reader.GetOutputPort())
+    imageChangeInformation.SetOutputSpacing( 1, 1, 1 )
+    imageChangeInformation.SetOutputOrigin( 0, 0, 0 )
+    imageChangeInformation.Update()
+
+    name = slicer.mrmlScene.GenerateUniqueName(slicer.util.toVTKString(name))
+    volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", name)
+    volumeNode.SetAndObserveImageData(imageChangeInformation.GetOutputDataObject(0))
+    slicer.vtkMRMLVolumeArchetypeStorageNode.SetMetaDataDictionaryFromReader(volumeNode, reader)
+    volumeNode.SetRASToIJKMatrix(reader.GetRasToIjkMatrix())
+    volumeNode.CreateDefaultDisplayNodes()
+
+    slicer.modules.DICOMInstance.reader = reader
+    slicer.modules.DICOMInstance.imageChangeInformation = imageChangeInformation
+
+    return(volumeNode)
+
+  def setVolumeNodeProperties(self,volumeNode,loadable):
     if volumeNode:
       #
       # create subject hierarchy items for the loaded series
@@ -328,7 +426,7 @@ class DICOMScalarVolumePluginClass(DICOMPlugin):
       selNode = appLogic.GetSelectionNode()
       selNode.SetReferenceActiveVolumeID(volumeNode.GetID())
       appLogic.PropagateVolumeSelection()
-      
+
       #
       # apply window/level from DICOM if available (the first pair that is found)
       #   Note: There can be multiple presets (multiplicity 1-n) in the standard [1]. We have
@@ -343,11 +441,40 @@ class DICOMScalarVolumePluginClass(DICOMPlugin):
         displayNode = volumeNode.GetDisplayNode()
         if displayNode:
           logging.info('Window/level found in DICOM tags (center=' + str(windowCenter) + ', width=' + str(windowWidth) + ') has been applied to volume ' + volumeNode.GetName())
-          displayNode.SetAutoWindowLevel(False)
-          displayNode.SetWindowLevel(windowWidth, windowCenter)
+          displayNode.AddWindowLevelPreset(windowWidth, windowCenter)
+          displayNode.SetWindowLevelFromPreset(0)
+        else:
+          logging.info('No display node: cannot use window/level found in DICOM tags')
       except ValueError:
         pass # DICOM tags cannot be parsed to floating point numbers
 
+  def loadWithMultipleLoaders(self,loadable):
+    """Load using multiple paths (for testing)
+    """
+    volumeNode = self.loadFilesWithArchetype(loadable.files, loadable.name+"-archetype")
+    self.setVolumeNodeProperties(volumeNode, loadable)
+    volumeNode = self.loadFilesWithSeriesReader("GDCM", loadable.files, loadable.name+"-gdcm")
+    self.setVolumeNodeProperties(volumeNode, loadable)
+    volumeNode = self.loadFilesWithSeriesReader("DCMTK", loadable.files, loadable.name+"-dcmtk")
+    self.setVolumeNodeProperties(volumeNode, loadable)
+
+    return volumeNode
+
+  def load(self,loadable,readerApproach=None):
+    """Load the select as a scalar volume using desired approach
+    """
+    if not readerApproach:
+      readerIndex = slicer.util.settingsValue('DICOM/ScalarVolume/ReaderApproach', 0, converter=int)
+      readerApproach = DICOMScalarVolumePluginClass.readerApproaches()[readerIndex]
+    if readerApproach == "Archetype":
+      volumeNode = self.loadFilesWithArchetype(loadable.files, loadable.name)
+    elif readerApproach == "GDCM with DCMTK fallback":
+      volumeNode = self.loadFilesWithSeriesReader("GDCM", loadable.files, loadable.name)
+      if not volumeNode:
+        volumeNode = self.loadFilesWithSeriesReader("DCMTK", loadable.files, loadable.name)
+    else:
+      volumeNode = self.loadFilesWithSeriesReader(readerApproach, loadable.files, loadable.name)
+    self.setVolumeNodeProperties(volumeNode, loadable)
     return volumeNode
 
   def examineForExport(self,subjectHierarchyItemID):

@@ -78,6 +78,10 @@ class UtilTestTest(ScriptedLoadableModuleTest):
     self.test_setSliceViewerLayers()
     self.test_loadUI()
     self.test_findChild()
+    self.test_arrayFromVolume()
+    self.test_updateVolumeFromArray()
+    self.test_arrayFromModelPoints()
+    self.test_array()
 
   def test_setSliceViewerLayers(self):
     self.delayDisplay('Testing slicer.util.setSliceViewerLayers')
@@ -184,3 +188,99 @@ class UtilTestTest(ScriptedLoadableModuleTest):
     except RuntimeError:
       caughtException = True
     self.assertTrue(caughtException)
+
+  def test_arrayFromVolume(self):
+    # Test if retrieving voxels as a numpy array works
+
+    self.delayDisplay('Download sample data')
+    import SampleData
+    sampleDataLogic = SampleData.SampleDataLogic()
+    volumeNode = sampleDataLogic.downloadMRHead()
+
+    self.delayDisplay('Test voxel value read')
+    voxelPos = [120,135,89]
+    voxelValueVtk = volumeNode.GetImageData().GetScalarComponentAsDouble(voxelPos[0], voxelPos[1], voxelPos[2], 0)
+    narray = slicer.util.arrayFromVolume(volumeNode)
+    voxelValueNumpy = narray[voxelPos[2], voxelPos[1], voxelPos[0]]
+    self.assertEqual(voxelValueVtk, voxelValueNumpy)
+
+    self.delayDisplay('Test voxel value write')
+    voxelValueNumpy =  155
+    narray[voxelPos[2], voxelPos[1], voxelPos[0]] = voxelValueNumpy
+    voxelValueVtk = volumeNode.GetImageData().GetScalarComponentAsDouble(voxelPos[0], voxelPos[1], voxelPos[2], 0)
+    self.assertEqual(voxelValueVtk, voxelValueNumpy)
+
+    self.delayDisplay('Testing slicer.util.test_arrayFromVolume passed')
+
+  def test_updateVolumeFromArray(self):
+    # Test if updating voxels from a numpy array works
+
+    self.delayDisplay('Download sample data')
+    import SampleData
+    sampleDataLogic = SampleData.SampleDataLogic()
+    volumeNode = sampleDataLogic.downloadMRHead()
+
+    import numpy as np
+    import math
+
+    def some_func(x, y, z):
+      return 0.1*x*x + 0.03*y*y + 0.05*z*z
+
+    f = np.fromfunction(some_func,(30,20,15))
+
+    slicer.util.updateVolumeFromArray(volumeNode, f)
+
+    self.delayDisplay('Test voxel value update')
+    voxelPos = [11, 12, 4]
+    voxelValueNumpy = some_func(voxelPos[2], voxelPos[1], voxelPos[0])
+    voxelValueVtk = volumeNode.GetImageData().GetScalarComponentAsDouble(voxelPos[0], voxelPos[1], voxelPos[2], 0)
+    self.assertEqual(voxelValueVtk, voxelValueNumpy)
+
+    self.delayDisplay('Testing slicer.util.test_updateVolumeFromArray passed')
+
+  def test_arrayFromModelPoints(self):
+    # Test if retrieving point coordinates as a numpy array works
+
+    self.delayDisplay('Create a model containing a sphere')
+    sphere = vtk.vtkSphereSource()
+    sphere.SetRadius(30.0)
+    sphere.Update()
+    modelNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLModelNode')
+    modelNode.SetAndObservePolyData(sphere.GetOutput())
+    modelNode.CreateDefaultDisplayNodes()
+    a = slicer.util.arrayFromModelPoints(modelNode)
+
+    self.delayDisplay('Change Y scaling')
+    a[:,2] = a[:,2] * 2.5
+    modelNode.GetPolyData().Modified()
+
+    self.delayDisplay('Testing slicer.util.test_arrayFromModelPoints passed')
+
+  def test_array(self):
+    # Test if convenience function of getting numpy array from various nodes works
+
+    self.delayDisplay('Test array with scalar image')
+    import SampleData
+    sampleDataLogic = SampleData.SampleDataLogic()
+    volumeNode = sampleDataLogic.downloadMRHead()
+    voxelPos = [120,135,89]
+    voxelValueVtk = volumeNode.GetImageData().GetScalarComponentAsDouble(voxelPos[0], voxelPos[1], voxelPos[2], 0)
+    narray = slicer.util.arrayFromVolume(volumeNode)
+    voxelValueNumpy = narray[voxelPos[2], voxelPos[1], voxelPos[0]]
+    self.assertEqual(voxelValueVtk, voxelValueNumpy)
+
+    self.delayDisplay('Test array with tensor image')
+    import SampleData
+    sampleDataLogic = SampleData.SampleDataLogic()
+    tensorVolumeNode = sampleDataLogic.downloadDTIBrain()
+    narray = slicer.util.array(tensorVolumeNode.GetName())
+    self.assertEqual(narray.shape, (85, 144, 144, 3, 3))
+
+    self.delayDisplay('Test array with model points')
+    sphere = vtk.vtkSphereSource()
+    modelNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLModelNode')
+    modelNode.SetPolyDataConnection(sphere.GetOutputPort())
+    narray = slicer.util.array(modelNode.GetName())
+    self.assertEqual(narray.shape, (50, 3))
+
+    self.delayDisplay('Testing slicer.util.test_array passed')
